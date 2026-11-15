@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111111">
+  <title>Proyecto en AR</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #000;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #ar { position: fixed; inset: 0; }
+
+    #inicio { position: fixed; inset: 0; z-index: 20; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 18px; padding: 24px;
+      background: #111; color: #fff; text-align: center; }
+    #inicio h1 { margin: 0; font-size: 22px; font-weight: 600; }
+    #inicio p { margin: 0; max-width: 420px; line-height: 1.45; color: #ccc; font-size: 15px; }
+    #btnInicio { font-size: 18px; padding: 14px 32px; border: 0; border-radius: 999px;
+      background: #fff; color: #111; font-weight: 600; }
+    #btnInicio:disabled { opacity: .5; }
+    #error { color: #ff8a8a; max-width: 420px; font-size: 14px; line-height: 1.4; }
+
+    #estado { position: fixed; left: 50%; bottom: calc(22px + env(safe-area-inset-bottom));
+      transform: translateX(-50%); z-index: 10; background: rgba(0,0,0,.62); color: #fff;
+      padding: 9px 16px; border-radius: 999px; font-size: 14px; white-space: nowrap;
+      pointer-events: none; transition: opacity .3s; }
+    #estado.oculto { opacity: 0; }
+  </style>
+
+  <!-- Versiones fijadas para que no se rompa con actualizaciones -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "mindar-image-three": "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="ar"></div>
+
+  <div id="inicio">
+    <h1>Proyecto en realidad aumentada</h1>
+    <p>Pulsa el botón, permite el acceso a la cámara y apunta al código QR.</p>
+    <button id="btnInicio" disabled>Cargando…</button>
+    <div id="error"></div>
+  </div>
+
+  <div id="estado" class="oculto"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+    import { MindARThree } from 'mindar-image-three';
+
+    // ───────────────────────── CONFIGURACIÓN ─────────────────────────
+    const CONFIG = {
+      // Marcador compilado con el compilador de MindAR (a partir de marcador.png)
+      target: './targets.mind',
+
+      // Fase 1: null → maqueta de prueba generada por código.
+      // Fase 2: ruta a tu .glb, p. ej. './modelos/planta.glb'
+      modelo: null,
+
+      // true  → el QR está tumbado (tablet sobre la mesa o papel impreso en horizontal):
+      //         la maqueta "se levanta" sobre él.
+      // false → el QR está en una pantalla vertical: la maqueta sale de su borde inferior.
+      marcadorTumbado: true,
+
+      // Tamaño de la maqueta respecto al ancho del marcador (1 = el marcador entero).
+      escala: 0.9,
+
+      // Suavizado del seguimiento (filtro One Euro de MindAR).
+      // Si tiembla: baja filterMinCF. Si va con retraso al mover el móvil: sube filterBeta.
+      filterMinCF: 0.0001,
+      filterBeta: 0.01,
+
+      // Fotogramas sin ver el marcador antes de ocultar la maqueta (evita parpadeos).
+      missTolerance: 10,
+      warmupTolerance: 3,
+    };
+    // ─────────────────────────────────────────────────────────────────
+
+    const $inicio = document.getElementById('inicio');
+    const $btn = document.getElementById('btnInicio');
+    const $error = document.getElementById('error');
+    const $estado = document.getElementById('estado');
+
+    const estado = (txt) => {
+      $estado.textContent = txt || '';
+      $estado.classList.toggle('oculto', !txt);
+    };
+    const error = (txt) => { $error.textContent = txt; };
+
+    // Comprobaciones previas: cámara solo con HTTPS (o localhost)
+    if (!window.isSecureContext) {
+      error('Esta página necesita HTTPS para usar la cámara. Ábrela desde la dirección https://…');
+    } else if (!navigator.mediaDevices?.getUserMedia) {
+      error('Este navegador no permite usar la cámara. Abre el enlace en Chrome (Android) o Safari (iPhone/iPad).');
+    }
+
+    // ── Escena AR ──
+    const mindarThree = new MindARThree({
+      container: document.getElementById('ar'),
+      imageTargetSrc: CONFIG.target,
+      maxTrack: 1,
+      uiLoading: 'no', uiScanning: 'no', uiError: 'no',   // usamos nuestro propio aviso
+      filterMinCF: CONFIG.filterMinCF,
+      filterBeta: CONFIG.filterBeta,
+      missTolerance: CONFIG.missTolerance,
+      warmupTolerance: CONFIG.warmupTolerance,
+    });
+    const { renderer, scene, camera } = mindarThree;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    // El ancla 0 es la imagen del marcador: plano XY, ancho = 1 unidad, Z sale hacia fuera.
+    const ancla = mindarThree.addAnchor(0);
+
+    // Contenedor que orienta la maqueta según cómo esté el marcador
+    const soporte = new THREE.Group();
+    if (CONFIG.marcadorTumbado) {
+      soporte.rotation.x = Math.PI / 2;      // el "arriba" del modelo (Y) pasa a ser la normal del marcador
+    } else {
+      soporte.position.y = -0.5;             // apoyada en el borde inferior de la pantalla
+    }
+    ancla.group.add(soporte);
+
+    // Luces (van dentro del ancla para que la sombra acompañe a la maqueta)
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 1.6));
+    const sol = new THREE.DirectionalLight(0xffffff, 1.8);
+    sol.position.set(0.6, 1.4, 0.8);
+    sol.castShadow = true;
+    sol.shadow.mapSize.set(1024, 1024);
+    Object.assign(sol.shadow.camera, { left: -1, right: 1, top: 1, bottom: -1, near: 0.01, far: 5 });
+    sol.shadow.bias = -0.0005;
+    soporte.add(sol, sol.target);
+
+    // Plano invisible que solo recibe la sombra → la maqueta "se posa" sobre el QR
+    const suelo = new THREE.Mesh(
+      new THREE.PlaneGeometry(3, 3),
+      new THREE.ShadowMaterial({ opacity: 0.28 })
+    );
+    suelo.rotation.x = -Math.PI / 2;
+    suelo.receiveShadow = true;
+    soporte.add(suelo);
+
+    // ── Maqueta de prueba (Fase 1) ──
+    function crearMaquetaPrueba() {
+      const g = new THREE.Group();
+      g.name = 'maqueta_prueba';
+      const blanco = new THREE.MeshStandardMaterial({ color: 0xf4f4f2, roughness: 0.85 });
+      const mat = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.6 });
+      const caja = (w, h, d, x, y, z, m, nombre) => {
+        const me = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+        me.position.set(x, y + h / 2, z);
+        if (nombre) me.name = nombre;
+        g.add(me);
+        return me;
+      };
+      // Planta: losa + muros (medidas en metros, como en Blender)
+      caja(10, 0.3, 7, 0, 0, 0, blanco, 'planta_0');
+      caja(10, 3, 0.25, 0, 0.3, -3.375, blanco);         // muro norte
+      caja(0.25, 3, 7, -4.875, 0.3, 0, blanco);          // muro oeste
+      caja(0.25, 3, 3, 4.875, 0.3, -2, blanco);          // muro este (parcial)
+      caja(4, 3, 0.25, -3, 0.3, 3.375, blanco);          // muro sur (parcial)
+      // Cubierta volada
+      const cub = caja(10.6, 0.25, 7.6, 0, 3.3, 0, blanco, 'cubierta');
+      // Mobiliario en colores primarios
+      caja(2.2, 0.75, 1, -1.5, 0.3, -0.8, mat(0xd62828));   // mesa roja
+      caja(0.5, 0.45, 0.5, -1.5, 0.3, 0.3, mat(0xf2c200));  // taburetes amarillos
+      caja(0.5, 0.45, 0.5, -0.6, 0.3, 0.3, mat(0xf2c200));
+      caja(2.6, 0.8, 0.9, 2.6, 0.3, -2.5, mat(0x1d4ed8));   // sofá azul
+      const cil = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 0.5, 32), mat(0xd62828));
+      cil.position.set(2.4, 0.55, 1.4); g.add(cil);
+      // Hacer la cubierta semitransparente para ver el interior desde arriba
+      cub.material = blanco.clone();
+      cub.material.transparent = true;
+      cub.material.opacity = 0.35;
+      cub.userData.sinSombra = true;
+      return g;
+    }
+
+    async function cargarModelo() {
+      if (!CONFIG.modelo) return crearMaquetaPrueba();
+      const draco = new DRACOLoader();
+      draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/gltf/');
+      const loader = new GLTFLoader();
+      loader.setDRACOLoader(draco);
+      const gltf = await loader.loadAsync(CONFIG.modelo, (e) => {
+        if (e.total) $btn.textContent = `Cargando modelo… ${Math.round(e.loaded / e.total * 100)} %`;
+      });
+      return gltf.scene;
+    }
+
+    // Escala la maqueta para que quepa en el marcador, la centra y la apoya en el plano
+    function encajar(obj) {
+      const caja = new THREE.Box3().setFromObject(obj);
+      const tam = caja.getSize(new THREE.Vector3());
+      const centro = caja.getCenter(new THREE.Vector3());
+      const s = CONFIG.escala / Math.max(tam.x, tam.z);
+      const pivote = new THREE.Group();
+      obj.position.set(-centro.x, -caja.min.y, -centro.z);
+      pivote.add(obj);
+      pivote.scale.setScalar(s);
+      obj.traverse((o) => { if (o.isMesh) o.castShadow = !o.userData.sinSombra; });
+      return pivote;
+    }
+
+    // Avisos según el seguimiento
+    ancla.onTargetFound = () => estado('');
+    ancla.onTargetLost  = () => estado('Apunta al código QR');
+
+    // ── Arranque ──
+    try {
+      const modelo = await cargarModelo();
+      soporte.add(encajar(modelo));
+      $btn.textContent = 'Iniciar cámara';
+      $btn.disabled = !!$error.textContent;
+    } catch (e) {
+      console.error(e);
+      error('No se ha podido cargar el modelo 3D. Revisa la ruta en CONFIG.modelo.');
+    }
+
+    $btn.addEventListener('click', async () => {
+      $btn.disabled = true;
+      $btn.textContent = 'Abriendo cámara…';
+      try {
+        await mindarThree.start();
+        $inicio.style.display = 'none';
+        estado('Apunta al código QR');
+        renderer.setAnimationLoop(() => renderer.render(scene, camera));
+      } catch (e) {
+        console.error(e);
+        $btn.disabled = false;
+        $btn.textContent = 'Reintentar';
+        if (e?.name === 'NotAllowedError') {
+          error('Has denegado la cámara. Actívala en los ajustes del navegador para esta web y recarga.');
+        } else if (e?.name === 'NotFoundError') {
+          error('No se encuentra ninguna cámara en este dispositivo.');
+        } else if (String(e).includes('mind')) {
+          error('No se encuentra targets.mind. Súbelo junto a index.html.');
+        } else {
+          error('No se ha podido iniciar la cámara: ' + (e?.message || e));
+        }
+      }
+    });
+
+    // Pausar la cámara al salir de la pestaña y reanudar al volver
+    document.addEventListener('visibilitychange', () => {
+      if ($inicio.style.display !== 'none') return;
+      if (document.hidden) mindarThree.pause(true); else mindarThree.unpause();
+    });
+  </script>
+</body>
+</html>
