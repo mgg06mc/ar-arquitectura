@@ -81,8 +81,19 @@
 
       // Suavizado del seguimiento (filtro One Euro de MindAR). Valores por defecto de MindAR.
       // Si tiembla quieto: baja mincf (0.0001). Si "nada" o va con retraso al mover: sube beta.
-      filterMinCF: num('mincf', 0.001),
-      filterBeta: num('beta', 1000),
+      filterMinCF: num('mincf', 0.0001),
+      filterBeta: num('beta', 1),
+
+      // Estabilizador propio (encima del de MindAR): si el marcador apenas se mueve
+      // (temblor) la maqueta casi no se mueve; si te mueves de verdad, la sigue rápido.
+      //   amin: seguimiento en reposo (más bajo = más quieto)      ?amin=0.06
+      //   amax: seguimiento en movimiento (más alto = más rápido)  ?amax=0.6
+      //   dref: cuánto movimiento cuenta como "de verdad" (en anchos de marcador) ?dref=0.02
+      estabilizador: !P.has('sinestab'),
+      amin: num('amin', 0.06),
+      amax: num('amax', 0.6),
+      dref: num('dref', 0.02),
+      angref: num('angref', 3),   // grados
 
       // Fotogramas sin ver el marcador antes de ocultar la maqueta (evita parpadeos).
       missTolerance: num('miss', 5),
@@ -133,9 +144,36 @@
     } else {
       soporte.position.y = -0.5;             // apoyada en el borde inferior de la pantalla
     }
-    ancla.group.add(soporte);
+    // "visor" = copia suavizada de la posición del ancla. La maqueta cuelga de aquí.
+    const visor = new THREE.Group();
+    visor.matrixAutoUpdate = false;
+    visor.visible = false;
+    scene.add(visor);
+    visor.add(soporte);
 
-    // Luces (van dentro del ancla para que la sombra acompañe a la maqueta)
+    const _p = new THREE.Vector3(), _q = new THREE.Quaternion(), _s = new THREE.Vector3();
+    const vp = new THREE.Vector3(), vq = new THREE.Quaternion(), vs = new THREE.Vector3();
+    let recienEncontrado = true;
+    function estabilizar() {
+      const g = ancla.group;
+      if (!g.visible) { visor.visible = false; recienEncontrado = true; return; }
+      g.matrix.decompose(_p, _q, _s);
+      if (recienEncontrado || !CONFIG.estabilizador) {
+        vp.copy(_p); vq.copy(_q); vs.copy(_s); recienEncontrado = false;
+      } else {
+        const ancho = Math.max(_s.x, 1e-6);
+        const d = vp.distanceTo(_p) / ancho;                       // en anchos de marcador
+        const ang = THREE.MathUtils.radToDeg(vq.angleTo(_q));      // en grados
+        const r = Math.max(d / CONFIG.dref, ang / CONFIG.angref);  // 0 = quieto, ≥1 = movimiento real
+        const a = THREE.MathUtils.clamp(CONFIG.amin + (CONFIG.amax - CONFIG.amin) * r, CONFIG.amin, CONFIG.amax);
+        vp.lerp(_p, a); vq.slerp(_q, a); vs.lerp(_s, a);
+      }
+      visor.matrix.compose(vp, vq, vs);
+      visor.matrixWorldNeedsUpdate = true;
+      visor.visible = true;
+    }
+
+    // Luces (van dentro del visor para que la sombra acompañe a la maqueta)
     scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8a8a, 1.6));
     const sol = new THREE.DirectionalLight(0xffffff, 1.8);
     sol.position.set(0.6, 1.4, 0.8);
@@ -238,7 +276,7 @@
         await mindarThree.start();
         $inicio.style.display = 'none';
         estado('Apunta al código QR');
-        renderer.setAnimationLoop(() => renderer.render(scene, camera));
+        renderer.setAnimationLoop(() => { estabilizar(); renderer.render(scene, camera); });
       } catch (e) {
         console.error(e);
         $btn.disabled = false;
