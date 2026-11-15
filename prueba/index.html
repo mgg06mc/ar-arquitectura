@@ -56,6 +56,12 @@
     import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
     import { MindARThree } from 'mindar-image-three';
 
+    // Parámetros en la URL para probar sin volver a subir nada, p. ej.:
+    //   .../prueba/?vertical          → pantalla de pie
+    //   .../prueba/?mincf=0.0001&beta=50  → más suavizado
+    const P = new URLSearchParams(location.search);
+    const num = (k, def) => (P.has(k) && !isNaN(parseFloat(P.get(k)))) ? parseFloat(P.get(k)) : def;
+
     // ───────────────────────── CONFIGURACIÓN ─────────────────────────
     const CONFIG = {
       // Marcador compilado con el compilador de MindAR (a partir de marcador.png)
@@ -68,19 +74,19 @@
       // true  → el QR está tumbado (tablet sobre la mesa o papel impreso en horizontal):
       //         la maqueta "se levanta" sobre él.
       // false → el QR está en una pantalla vertical: la maqueta sale de su borde inferior.
-      marcadorTumbado: true,
+      marcadorTumbado: !P.has('vertical'),
 
       // Tamaño de la maqueta respecto al ancho del marcador (1 = el marcador entero).
-      escala: 0.9,
+      escala: num('escala', 0.6),
 
-      // Suavizado del seguimiento (filtro One Euro de MindAR).
-      // Si tiembla: baja filterMinCF. Si va con retraso al mover el móvil: sube filterBeta.
-      filterMinCF: 0.0001,
-      filterBeta: 0.01,
+      // Suavizado del seguimiento (filtro One Euro de MindAR). Valores por defecto de MindAR.
+      // Si tiembla quieto: baja mincf (0.0001). Si "nada" o va con retraso al mover: sube beta.
+      filterMinCF: num('mincf', 0.001),
+      filterBeta: num('beta', 1000),
 
       // Fotogramas sin ver el marcador antes de ocultar la maqueta (evita parpadeos).
-      missTolerance: 10,
-      warmupTolerance: 3,
+      missTolerance: num('miss', 5),
+      warmupTolerance: num('warmup', 5),
     };
     // ─────────────────────────────────────────────────────────────────
 
